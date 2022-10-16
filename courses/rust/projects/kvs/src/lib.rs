@@ -7,7 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use failure::Fail;
 use serde::{Serialize, Deserialize};
 use std::fs::{File, OpenOptions};
-use std::{io};
+use std::io;
 use std::io::prelude::*;
 use std::io::{SeekFrom, Seek};
 use std::io::{BufReader, BufWriter};
@@ -97,14 +97,14 @@ impl KvStore {
         .unwrap().as_millis()
     }
  
-    fn get_file_name() -> String {
+    fn get_file_name(extension : &str) -> String {
         let mut rng = rand::thread_rng();
         let n1: u8 = rng.gen();
-        format!("kvs{}.bin", n1)
+        format!("kvs{}_{}.{}", n1, Self::get_timestamp(), extension)
     }
 
     fn create_new_file(dir_path : &PathBuf, index : u32) -> KvsFile {
-        let file_name = Self::get_file_name();
+        let file_name = Self::get_file_name("bin");
         let mut file_path = dir_path.clone();
         file_path.push(file_name);
         Self::create_kvs_file(&file_path, index)
@@ -188,7 +188,8 @@ impl KvStore {
                 },
                 None => break
             }
-            offset += itr.byte_offset() as u64;
+            let itr_offset = itr.byte_offset();
+            offset = itr_offset as u64;
         }
         kvs_file.buf_reader.seek(SeekFrom::Start(0)).unwrap();
         Ok((set_map, del_map))
@@ -269,6 +270,8 @@ impl KvStore {
         cur_file.buf_writer.flush()?;
         self.map.insert(key,KvsEntry::new(cur_file.index, timestamp, self.cur_offset));
         self.cur_offset += bytes_written as u64;
+        self.check_cur_file_over_size();
+        self.compaction_required();
         Ok(())
     }
 
@@ -298,9 +301,78 @@ impl KvStore {
             cur_file.buf_writer.flush()?;
             self.cur_offset += bytes_written as u64;
             self.map.remove(&key);
+            self.check_cur_file_over_size();
+            self.compaction_required();
             Ok(())
         } else {
             Err(KeyNotFound)
         }
+    }
+
+    fn check_cur_file_over_size(&mut self) -> () {
+        if self.cur_offset >= 1_000_000 {
+            let file_index = self.get_file_index();
+            self.files.insert(file_index, Self::create_new_file(&self.dir_path, file_index));
+            self.cur_index = file_index;
+            self.cur_offset = 0;
+        }
+    }
+
+    fn compaction_required(&mut self) -> () {
+        if self.files.len() == 4 {
+            self.compact().unwrap();
+        }
+    }
+
+    fn get_file_index(&self) -> u32 {
+        let mut rng = rand::thread_rng();
+        loop {
+            let index = rng.gen::<u32>();
+            if !self.files.contains_key(&index) {
+                return index.clone()
+            }
+        }
+    }
+
+    fn compact(&mut self) -> Result<()> {
+
+        let compaction_file_index = self.get_file_index();
+        self.files.insert(compaction_file_index, Self::create_new_file(&self.dir_path, compaction_file_index));
+
+        let keys = self.map.keys().map(|x| x.clone()).collect::<Vec<String>>();
+        
+        let mut offset = 0;
+        for entry in keys {
+            let value = self.get(entry.clone()).unwrap().unwrap();
+            let kvs_entry = self.map.get(&entry).unwrap();
+            let command = KvsCommand::set(entry.clone(), value.clone(),kvs_entry.get_timestamp());
+            let json_str = serde_json::to_string(&command)?;
+            let compaction_file = self.files.get_mut(&compaction_file_index).unwrap();
+            let bytes_written = compaction_file.buf_writer.write(json_str.as_bytes())?;
+            compaction_file.buf_writer.flush()?;
+            self.map.insert(entry.clone(), KvsEntry::new(compaction_file_index, kvs_entry.get_timestamp(), offset));
+            offset += bytes_written as u64;
+        }
+        
+        let cur_file_index = self.get_file_index();
+        self.files.insert(cur_file_index, Self::create_new_file(&self.dir_path, cur_file_index));
+        self.cur_index = cur_file_index;
+        self.cur_offset = 0;
+
+        let file_to_be_removed_indexs = self.files.keys()
+            .map(|x| x.clone())
+            .into_iter()
+            .collect::<Vec<u32>>();
+       
+        for file_index in file_to_be_removed_indexs {
+            if file_index == compaction_file_index || file_index == cur_file_index {
+                // DO Nothing
+            } else {
+            let file = self.files.remove(&file_index).unwrap();
+            std::fs::remove_file(file.file_path).unwrap();
+            }
+        }
+
+        Ok(())
     }
 }
