@@ -1,9 +1,10 @@
-use std::env::current_dir;
+use std::io::Write;
+use std::net::TcpStream;
 use clap::{arg, Command};
-use kvs::{KvStore, Result};
+use kvs::DbCommand;
 use log::{info, error};
 
-fn main() -> Result<()> {
+fn main() -> () {
 
     stderrlog::new()
     .module(module_path!())
@@ -35,40 +36,43 @@ fn main() -> Result<()> {
 
     let address = matches.get_one::<String>("addr").unwrap();
     info!("Using IP:PORT={} to send command.", address);
+    let mut tcp_stream = TcpStream::connect(address).unwrap();
+    info!("Connected to IP:PORT={}", address);
 
-    let mut kv_store = KvStore::open(current_dir().unwrap())?;
+
     match matches.subcommand() {
         Some(("set", args))=> {
             let key = args.value_of("KEY").unwrap();
             let value = args.value_of("VALUE").unwrap();
             info!("Executing SET Key={}, Value={}", key, value);
-            kv_store.set(key.to_string(), value.clone().to_string())?;
+            let set_command = DbCommand::Set(key.to_string(), value.clone().to_string());
+            let set_command = serde_json::to_string(&set_command).unwrap();
+            tcp_stream.write(set_command.as_bytes()).unwrap();
+            let result_command : DbCommand = serde_json::from_reader(tcp_stream).unwrap();
+            info!("SET Result = {:?}", result_command);  
         },
         Some(("get", args)) => {
             let key = args.value_of("KEY").unwrap();
             info!("Executing GET Key={}", key);
-            let value = kv_store.get(key.to_string())?;
-            match value {
-                Some(x) => println!("{}", x),
-                None => println!("Key not found"),
-            }
+            let get_command = DbCommand::Get(key.to_string());
+            let get_command = serde_json::to_string(&get_command).unwrap();
+            tcp_stream.write(get_command.as_bytes()).unwrap();
+            let result_command : DbCommand = serde_json::from_reader(tcp_stream).unwrap();
+            info!("GET Result = {:?}", result_command);  
         },
         Some(("rm", args)) => {
             let key = args.value_of("KEY").unwrap();
             info!("Executing RM Key={}", key);
-            let result = kv_store.remove(key.to_string());
-            match result {
-                Err(err) => {
-                    println!("{}", err);
-                    std::process::exit(1);
-                },
-                _ => {},
-            }
+            let rm_command = DbCommand::Rm(key.to_string());
+            let rm_command = serde_json::to_string(&rm_command).unwrap();
+            tcp_stream.write(rm_command.as_bytes()).unwrap();
+            let result_command : DbCommand = serde_json::from_reader(tcp_stream).unwrap();
+            info!("RM Result = {:?}", result_command);
         },
         _ => {
             error!("Unknown Command, Exiting...");
             std::process::exit(1)
         }
     }
-    Ok(())
+    ()
 }

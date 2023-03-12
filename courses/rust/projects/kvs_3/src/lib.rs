@@ -40,6 +40,18 @@ impl From<serde_json::Error> for KvsError {
     }
 }
 
+#[derive(Serialize, Deserialize, Debug)]
+pub enum DbCommand {
+    Get(String),
+    GetResult(String),
+    Set(String, String),
+    SetResult(String),
+    Rm(String),
+    RmResult(),
+    Error(String)
+}
+
+
 #[derive(Serialize, Deserialize)]
 pub enum KvsCommand {
     Set(String, String, u128),
