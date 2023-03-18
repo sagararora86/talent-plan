@@ -1,6 +1,6 @@
 use std::{net::TcpListener, io::Write, env::current_dir};
 use clap::{Command, arg};
-use kvs::{Result, DbCommand, KvStore};
+use kvs::{Result, DbCommand, KvStore, KvsEngine};
 use log::{info, error};
 use serde::Deserialize;
 
@@ -14,20 +14,27 @@ fn main() -> Result<()> {
 
     let version = env!("CARGO_PKG_VERSION");
     let matches = Command::new("kvs-server")
-    .arg(
+    .args(&[
+        arg!(--engine <"ENGINE-NAME"> "Provide EngineName")
+        .required(false)
+        .value_parser(["kvs", "sled"])
+        .default_value("kvs"),
         arg!(--addr <ADDR> "Provide IP:PORT")
         .required(false)
         .default_value("127.0.0.1:4000")
-        
-    )
+    ])
     .version(version)
     .get_matches();
 
     let address = matches.get_one::<String>("addr").unwrap();
-    let mut kv_store = KvStore::open(current_dir().unwrap())?;
+    let engine = matches.get_one::<String>("engine").unwrap();
+    let cur_dir = current_dir().unwrap();
+    info!("Opening Database at Location={}", &cur_dir.display());
+    let mut kv_store : Box<dyn KvsEngine> = Box::new(KvStore::open(cur_dir)?);
     
     info!("KVS Server version={}", version);
     info!("Started Listening on IP:PORT={}", address);
+    info!("KvsServer Engine={}", engine);
 
     let tcp_listener = TcpListener::bind(address).unwrap();
     for stream in tcp_listener.incoming() {

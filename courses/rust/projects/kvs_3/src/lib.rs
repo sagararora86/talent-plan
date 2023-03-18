@@ -17,6 +17,15 @@ use crate::KvsError::KeyNotFound;
 
 pub type Result<T> = std::result::Result<T, KvsError>;
 
+pub trait KvsEngine {
+
+    fn set(&mut self, key: String, value: String) -> Result<()>;
+
+    fn get(&mut self, key: String) -> Result<Option<String>>;
+
+    fn remove(&mut self, key: String) -> Result<()>;
+}
+
 #[derive(Fail, Debug)]
 #[fail(display = "Error in KVS")]
 pub enum KvsError {
@@ -101,6 +110,57 @@ struct KvsFile {
     index : u32
 }
 
+impl KvsEngine for KvStore {
+
+    fn set(&mut self, key: String, value: String) -> Result<()> {
+        let timestamp = Self::get_timestamp();
+        let command = KvsCommand::set(key.clone(), value.clone(), timestamp);
+        let json_str = serde_json::to_string(&command)?;
+        let cur_file = self.files.get_mut(&self.cur_index).unwrap();
+        let bytes_written = cur_file.buf_writer.write(json_str.as_bytes())?;
+        cur_file.buf_writer.flush()?;
+        self.map.insert(key,KvsEntry::new(cur_file.index, timestamp, self.cur_offset));
+        self.cur_offset += bytes_written as u64;
+        self.check_cur_file_over_size();
+        self.compaction_required();
+        Ok(())
+    }
+
+    fn get(&mut self, key: String) -> Result<Option<String>> {
+        match self.map.get(&key) {
+            Some(entry) => {
+                    let kvs_file = self.files.get_mut(&entry.file_index).unwrap();
+                    kvs_file.buf_reader.seek(SeekFrom::Start(entry.offset.clone()))?;
+                    let kvs_command = serde_json::Deserializer::from_reader(&mut kvs_file.buf_reader)
+                        .into_iter::<KvsCommand>().next().unwrap()?;
+                    match kvs_command {
+                        Set(_, v, _) => Ok(Some(v)),
+                        _ => panic!("No Set command found")
+                    }
+            }
+            None => Ok(None),
+        }
+    }
+
+    fn remove(&mut self, key: String) -> Result<()> {
+        if self.map.contains_key(&key) {
+            let timestamp = Self::get_timestamp();
+            let command = KvsCommand::rm(key.clone(), timestamp);
+            let json_str = serde_json::to_string(&command)?;
+            let cur_file = self.files.get_mut(&self.cur_index).unwrap();
+            let bytes_written = cur_file.buf_writer.write(json_str.as_bytes())?;
+            cur_file.buf_writer.flush()?;
+            self.cur_offset += bytes_written as u64;
+            self.map.remove(&key);
+            self.check_cur_file_over_size();
+            self.compaction_required();
+            Ok(())
+        } else {
+            Err(KeyNotFound)
+        }
+    }
+}
+
 impl KvStore {
 
     fn get_timestamp() -> u128 {
@@ -129,7 +189,9 @@ impl KvStore {
             let path = entry.path();
     
             let metadata = std::fs::metadata(&path).unwrap();
-            if metadata.is_file() && path.extension().unwrap() == "bin" {
+            if metadata.is_file() && 
+                path.extension().is_some() && 
+                path.extension().unwrap() == "bin" {
                 files_vec.push(path);
             }
         }
@@ -273,53 +335,6 @@ impl KvStore {
 
     }
     
-    pub fn set(&mut self, key: String, value: String) -> Result<()> {
-        let timestamp = Self::get_timestamp();
-        let command = KvsCommand::set(key.clone(), value.clone(), timestamp);
-        let json_str = serde_json::to_string(&command)?;
-        let cur_file = self.files.get_mut(&self.cur_index).unwrap();
-        let bytes_written = cur_file.buf_writer.write(json_str.as_bytes())?;
-        cur_file.buf_writer.flush()?;
-        self.map.insert(key,KvsEntry::new(cur_file.index, timestamp, self.cur_offset));
-        self.cur_offset += bytes_written as u64;
-        self.check_cur_file_over_size();
-        self.compaction_required();
-        Ok(())
-    }
-
-    pub fn get(&mut self, key: String) -> Result<Option<String>> {
-        match self.map.get(&key) {
-            Some(entry) => {
-                    let kvs_file = self.files.get_mut(&entry.file_index).unwrap();
-                    kvs_file.buf_reader.seek(SeekFrom::Start(entry.offset.clone()))?;
-                    let kvs_command = serde_json::Deserializer::from_reader(&mut kvs_file.buf_reader)
-                        .into_iter::<KvsCommand>().next().unwrap()?;
-                    match kvs_command {
-                        Set(_, v, _) => Ok(Some(v)),
-                        _ => panic!("No Set command found")
-                    }
-            }
-            None => Ok(None),
-        }
-    }
-
-    pub fn remove(&mut self, key: String) -> Result<()> {
-        if self.map.contains_key(&key) {
-            let timestamp = Self::get_timestamp();
-            let command = KvsCommand::rm(key.clone(), timestamp);
-            let json_str = serde_json::to_string(&command)?;
-            let cur_file = self.files.get_mut(&self.cur_index).unwrap();
-            let bytes_written = cur_file.buf_writer.write(json_str.as_bytes())?;
-            cur_file.buf_writer.flush()?;
-            self.cur_offset += bytes_written as u64;
-            self.map.remove(&key);
-            self.check_cur_file_over_size();
-            self.compaction_required();
-            Ok(())
-        } else {
-            Err(KeyNotFound)
-        }
-    }
 
     fn check_cur_file_over_size(&mut self) -> () {
         if self.cur_offset >= 1_000_000 {
