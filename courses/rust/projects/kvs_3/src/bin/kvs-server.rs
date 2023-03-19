@@ -1,6 +1,6 @@
-use std::{net::TcpListener, io::Write, env::current_dir};
+use std::{net::TcpListener, io::{Write, BufReader, BufRead}, env::current_dir, path::{Path}, fs::OpenOptions};
 use clap::{Command, arg};
-use kvs::{Result, DbCommand, KvStore, KvsEngine};
+use kvs::{Result, DbCommand, KvStore, KvsEngine, KvsError};
 use log::{info, error};
 use serde::Deserialize;
 
@@ -30,8 +30,21 @@ fn main() -> Result<()> {
     let engine = matches.get_one::<String>("engine").unwrap();
     let cur_dir = current_dir().unwrap();
     info!("Opening Database at Location={}", &cur_dir.display());
-    let mut kv_store : Box<dyn KvsEngine> = Box::new(KvStore::open(cur_dir)?);
+    let mut kv_store : Box<dyn KvsEngine> = Box::new(KvStore::open(&cur_dir)?);
     
+    let engine_in_file = get_existing_engine(&cur_dir.as_path());
+    if let Some(x) = engine_in_file {
+        if let Some((_, engine_type)) = x.split_once("=") {
+            if !str::eq(engine_type, engine) {
+                std::process::exit(1);
+            }
+        }
+
+        
+    } else {
+        update_engine_in_file(&cur_dir.as_path(), &engine).unwrap();
+    }
+
     info!("KVS Server version={}", version);
     info!("Started Listening on IP:PORT={}", address);
     info!("KvsServer Engine={}", engine);
@@ -62,16 +75,13 @@ fn main() -> Result<()> {
             DbCommand::Get(a) => {
                 info!("Executing Command=GET Key={}", a);
                 let result = kv_store.get(a.to_string());
-                let data_to_write;
-                if result.is_err() {
-                    let error = result.err().unwrap().to_string();
-                    let error = DbCommand::Error(error);
-                    data_to_write = serde_json::to_string(&error).unwrap();
-                    error!("Error Command=GET, error={:?}", error)
-                } else {
-                    let command = DbCommand::GetResult(result.unwrap().unwrap());
-                    data_to_write = serde_json::to_string(&command).unwrap(); 
-                }
+                let command : DbCommand;
+                    if let Some(x) = result.unwrap() {
+                        command = DbCommand::GetResult(x);
+                    } else {
+                        command = DbCommand::Error(KvsError::KeyNotFound.to_string());
+                    }
+                let data_to_write = serde_json::to_string(&command).unwrap(); 
                 tcp_stream.write(data_to_write.as_bytes()).unwrap();
                 info!("Command=GET Key={} executed successfully.", a);
             },
@@ -100,5 +110,41 @@ fn main() -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+fn get_existing_engine(cur_dir : &Path) ->  Option<String> {
+    let config_file = cur_dir.join(".config");
+
+    let exits = Path::new(config_file.as_path()).exists();
+    if !exits {
+        return None;
+    }
+
+    let file = OpenOptions::new()
+        .read(true)
+        .open(config_file).unwrap();
+
+    let buf_reader = BufReader::new(file);
+    buf_reader.lines()
+    .filter(|x| x.is_ok())
+    .map(|x| x.unwrap())
+    .find(|x| {
+        return x.starts_with("engine")
+    })
+}
+
+fn update_engine_in_file(cur_dir : &Path, engine : &str) -> Result<()> {
+    let config_file = cur_dir.join(".config");
+    let mut line_to_write = String::new();
+    line_to_write.push_str("engine=");
+    line_to_write.push_str(engine);
+    line_to_write.push('\n');
+    let _op = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .open(config_file).and_then(
+            |mut file| file.write(line_to_write.as_bytes())
+        ).unwrap();
     Ok(())
 }
